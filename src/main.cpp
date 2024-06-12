@@ -3,127 +3,96 @@
 #include <BLEServer.h>
 #include <BLEUtils.h>
 #include <BLE2902.h>
-// See the following for generating UUIDs:
-// https://www.uuidgenerator.net/
+#include <vector> // Include for std::vector
+#include <sstream>
 
-#define SERVICE_UUID "25AE1441-05D3-4C5B-8281-93D4E07420CF" // UART service UUID
-#define CHARACTERISTIC_UUID_INPUT "00002a22-0000-1000-8000-00805f9b34fb"
-#define CHARACTERISTIC_UUID_PID_CONST "00002a28-0000-1000-8000-00805f9b34fb"
+#define UART_SERVICE_UUID "25AE1441-05D3-4C5B-8281-93D4E07420CF"
+#define UART_INPUT_CHARACTERISTIC_UUID "00002a22-0000-1000-8000-00805f9b34fb"
+#define PID_CONTROL_CHARACTERISTIC_UUID "00002a28-0000-1000-8000-00805f9b34fb"
 
-BLECharacteristic *pCharacteristic;
-BLEServer *pServer;
+BLECharacteristic *uartInputCharacteristic;
+BLEServer *bleServer;
 bool deviceConnected = false;
+std::vector<int> sensorValues(16, 0); // Vector with 16 integers initialized to 0
 
-int sensors[17] = {0};
+class BLEConnectionHandler : public BLEServerCallbacks {
+    void onConnect(BLEServer* server) override {
+        deviceConnected = true;
+    }
 
-// this lamnda expression returns the size of an arry of any type <T>;
-// it is used to calculate the size of the sensors array
-template<typename T, size_t N>
-size_t getArraySize(T (&array)[N]) {
-    return N;
-}
-
-class MyServerCallbacks : public BLEServerCallbacks{
-  void onConnect(BLEServer *pServer){
-    deviceConnected = true;
-  };
-
-  void onDisconnect(BLEServer *pServer){
-    deviceConnected = false;
-  }
+    void onDisconnect(BLEServer* server) override {
+        deviceConnected = false;
+    }
 };
 
-class MyCallbacks : public BLECharacteristicCallbacks{
-  void onWrite(BLECharacteristic *pCharacteristic){
-    std::string readValue = pCharacteristic->getValue();
-
-    if (readValue.length() > 0){
-      Serial.println("*********");
-      Serial.print("Received Value: ");
-      Serial.println(readValue.c_str());
-      Serial.println("*********");
+class UARTDataHandler : public BLECharacteristicCallbacks {
+    void onWrite(BLECharacteristic* characteristic) override {
+        std::string value = characteristic->getValue();
+        if (!value.empty()) {
+           std::stringstream msg;
+            msg << "Received data: ";
+            for (size_t i = 0; i < value.length(); i++) {
+                msg << std::hex << (int)value[i] << " ";
+            }
+            Serial.println(msg.str().c_str());
+        }
     }
-  }
 };
 
-/**
- * Esta función genera números aleatorios entre 0 y 1000 para simular los valores
-*/
-void generateRandomValues() {
-  for (int i = 0; i < 17; i++) {
-    sensors[i] = random(100, 1000);
-  }
-}
-
-/**
- * Esta función se encarga de enviar la velcididad de los motores al dispositivo
- * así como los valores de los 16 sensores. 
- * @return Una cadena de texto con el formato:
- * rmp;s1;s2;s3;s4;s5;s6;s7;s8;s9;s10;s11;s12;s13;s14;s15;s16
-*/
-
-std::string getOutputString() {
-  std::string outputString = "";
-  for (int i = 0; i < 17; i++) {
-    outputString += std::to_string(sensors[i]);
-    if (i < 16) {
-      outputString += ";";
+void generateSensorValues() {
+    for (int& value : sensorValues) {
+        value = random(100, 1000);
     }
-  }
-  return outputString;
 }
 
-void setup(){
-  Serial.begin(115200);
-
-  // Create the BLE Device
-  BLEDevice::init("ESP32 UART Test"); // Give it a name
-
-  // Create the BLE Server
-  pServer = BLEDevice::createServer();
-  pServer->setCallbacks(new MyServerCallbacks());
-
-  // Create the BLE Service
-  BLEService *pService = pServer->createService(SERVICE_UUID);
-
-  // Create a BLE Characteristic
-  pCharacteristic = pService->createCharacteristic(
-      CHARACTERISTIC_UUID_INPUT,
-      BLECharacteristic::PROPERTY_NOTIFY | BLECharacteristic::PROPERTY_READ);
-
-  pCharacteristic->addDescriptor(new BLE2902());
-
-  BLECharacteristic *pCharacteristic = pService->createCharacteristic(
-      CHARACTERISTIC_UUID_PID_CONST,
-      BLECharacteristic::PROPERTY_NOTIFY | BLECharacteristic::PROPERTY_WRITE);
-
-  pCharacteristic->setCallbacks(new MyCallbacks());
-  
-
-  // Start the service
-  pService->start();
-
-  // Start advertising
-  pServer->getAdvertising()->start();
-  Serial.println("Waiting a client connection to notify...");
-
-  generateRandomValues();
+std::string createSensorDataString() {
+    std::stringstream dataString;
+    for (size_t i = 0; i < sensorValues.size(); i++) {
+        // Encode each sensor value as two bytes
+        int value = sensorValues[i];
+        dataString << (char)(value & 0xFF);
+        dataString << (char)((value >> 8) & 0xFF);
+    }
+    return dataString.str();
 }
 
-void loop(){
-  if (deviceConnected){
-    generateRandomValues();
-    auto outputString = getOutputString();
-    pCharacteristic->setValue(outputString.c_str());
+void setup() {
+    Serial.begin(115200);
+    BLEDevice::init("LF-Speedy");
 
-    pCharacteristic->notify(); // Send the value to the app!
-    Serial.print("*** Sent Value: ");
-    Serial.print(outputString.c_str());
-    Serial.println(" ***");
-  } else {
-    delay(500);
-    pServer->getAdvertising()->start();
+    bleServer = BLEDevice::createServer();
+    bleServer->setCallbacks(new BLEConnectionHandler());
 
-  }
-  delay(100); // bluetooth stack will go into congestion, if too many packets are sent
+    BLEService* uartService = bleServer->createService(UART_SERVICE_UUID);
+
+    uartInputCharacteristic = uartService->createCharacteristic(
+        UART_INPUT_CHARACTERISTIC_UUID,
+        BLECharacteristic::PROPERTY_NOTIFY | BLECharacteristic::PROPERTY_READ
+    );
+    uartInputCharacteristic->addDescriptor(new BLE2902());
+
+    BLECharacteristic* pidControlCharacteristic = uartService->createCharacteristic(
+        PID_CONTROL_CHARACTERISTIC_UUID,
+        BLECharacteristic::PROPERTY_NOTIFY | BLECharacteristic::PROPERTY_WRITE
+    );
+    pidControlCharacteristic->setCallbacks(new UARTDataHandler());
+
+    uartService->start();
+    bleServer->getAdvertising()->start();
+    Serial.println("Waiting for client connection to notify...");
+
+    generateSensorValues();
+}
+
+void loop() {
+    if (deviceConnected) {
+        generateSensorValues();
+        std::string sensorData = createSensorDataString();
+        uartInputCharacteristic->setValue(sensorData);
+        uartInputCharacteristic->notify();
+    } else {
+        delay(500);
+        bleServer->getAdvertising()->start();
+    }
+    delay(100);
 }
